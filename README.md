@@ -1,7 +1,7 @@
 
 <!-- README.md is generated from README.Rmd. -->
 
-# <img src="figures/mapi.png" align="right" height="185.5"/> Morphological Analysis of (Phyto)Plankton Imagery
+# <img src="figures/mapi.PNG" align="right" height="185.5"/> Morphological Analysis of (Phyto)Plankton Imagery
 
 <!-- badges: start -->
 
