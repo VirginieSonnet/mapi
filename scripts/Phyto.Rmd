@@ -1,0 +1,142 @@
+---
+title: "PCA" # title of the notebook
+author: "Virginie Sonnet \nvirginie_sonnet@uri.edu \nhttps://github.com/VirginieSonnet" # name, email and github with links
+date: "`r format(Sys.Date(), '%B %dth, %Y')`" # date of today (change th if today is 1st, 2nd or 3rd)
+output:
+  # specific format from the R package "rmdformats"
+  rmdformats::readthedown:
+    lightbox: TRUE # allows to click on an image to zoom in the HTML document
+    highlight: pygments # color code for code (default is also a good option)
+    toc_depth: 5 # level of headers to include in the table of contents 
+    # code_folding: "hide" # do not show the code (can access it with a button)
+    # use_bookdown: TRUE # automatic section numbering 
+    # toc_float: TRUE # for regular markdowns, allow the toc to not be on top but on the side
+---
+
+<style>
+body {
+font-family: "LM Roman"}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(factoextra)
+library(grid)
+library(extrafont)
+library(wesanderson)
+library(svglite)
+loadfonts()
+library(hrbrthemes)
+```
+
+## Introduction
+
+This code looks at the dominant phytoplankton groups each week. 
+
+## Phytoplankton data 
+
+A general phytoplankton classification is stored in the Mouw lab database (classifier 7). A weekly sum of the counts for each species is stored in the file *gsoIFCB_date+classnames+counts_weekly.csv*.
+
+We remove all non-identieid or non-living classes. 
+
+```{r}
+data_week <- read_csv("../data/gsoIFCB_date+classnames+counts_weekly.csv")
+
+# remove non-identified or non-living classes 
+data_week_filter <- data_week %>% 
+    filter(!(class %in% c("unclassified","bad","bead","bubble")))
+```
+
+We calculate the percentage that each class represents during each week and which one is the class with the highest percentage. 
+
+```{r}
+# calculate the total concentration per week
+counts_week_filter <- data_week_filter %>% 
+    group_by(date) %>% 
+    summarize(tot_counts = sum(counts))
+
+# add to the table and calculate the percentage for each group
+data_week_filter <- data_week_filter %>% 
+    left_join(counts_week_filter) %>% 
+    mutate(perc = counts*100/tot_counts)
+
+# main classes in percentage
+max_week_filter_perc <- data_week_filter %>% 
+    group_by(date) %>% 
+    filter(perc == max(perc)) %>% 
+    mutate(status="max") # add this column for plottingh later
+unique(max_week_filter_perc$class)
+```
+For visualization, we introduce Na in days that have missing data. 
+
+```{r}
+date <- tibble(date = seq(min(data_week_filter$date), max(data_week_filter$date), by="week"))
+data_week_filter <- data_week_filter %>%
+    select(-c(counts, tot_counts)) %>% 
+    # get a table of count species => introduce 0 when species is not present a day
+    pivot_wider(names_from=class, values_from = perc, values_fill=0) %>% 
+    # add NAs for days without any sampling 
+    right_join(date) %>%
+    arrange(date) %>% 
+    # get back to a long table with the maximum counts and attributed range 
+    pivot_longer(Akashiwo:Coscinodiscus, names_to="class",values_to="perc")
+```
+
+We add an extra column for the status of each week
+
+```{r}
+data_week_filter <- left_join(data_week_filter, max_week_filter_perc)
+```
+Now we can keep only those maximum classes and an extra one for *Cerataulina bergonii*, update their name to be more representative than what they are called in the database and plot them. 
+
+```{r}
+# filter only the max classes and rename them (could be coded better)
+toplot = data_week_filter %>% 
+  filter(class %in% c(unique(max_week_filter_perc$class),"Cerataulina bergonii")) %>% 
+  mutate(class = replace(class,class == "group chaetoceros straight", "Chaetoceros straight")) %>%
+  mutate(class = replace(class,class == "group chaetoceros single cell", "Chaetoceros single")) %>%
+  mutate(class = replace(class,class == "Protozoa", "Pointed nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Skeletonema", "Skeletonema sp.")) %>%
+  mutate(class = replace(class,class == "square unknown", "Square nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Leptocylindrus", "Leptocylindrus sp.")) %>%
+  mutate(class = replace(class,class == "unknown2", "Round nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Thalassiosira", "Thalassiosira sp."))
+
+# rename also the max table 
+max_week_filter_perc <- max_week_filter_perc %>% 
+    mutate(class = replace(class,class == "group chaetoceros straight", "Chaetoceros straight")) %>%
+  mutate(class = replace(class,class == "group chaetoceros single cell", "Chaetoceros single")) %>%
+  mutate(class = replace(class,class == "Protozoa", "Pointed nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Skeletonema", "Skeletonema sp.")) %>%
+  mutate(class = replace(class,class == "square unknown", "Square nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Leptocylindrus", "Leptocylindrus sp.")) %>%
+  mutate(class = replace(class,class == "unknown2", "Round nanophytoplankton")) %>%
+  mutate(class = replace(class,class == "Thalassiosira", "Thalassiosira sp."))
+```
+
+```{r}
+# plot
+ggplot(toplot, aes(x=date, y=perc, fill=factor(class, levels=c("Pointed nanophytoplankton","Skeletonema sp.", "Chaetoceros straight", "Square nanophytoplankton","Leptocylindrus sp.","Chaetoceros single","Round nanophytoplankton" ,"Thalassiosira sp.","Cerataulina bergonii")))) + 
+    geom_area(size=1, alpha=0.5) + 
+    geom_col(data=max_week_filter_perc) + 
+    facet_wrap(.~factor(class, levels=c("Pointed nanophytoplankton","Skeletonema sp.", "Chaetoceros straight", "Square nanophytoplankton","Leptocylindrus sp.","Chaetoceros single","Round nanophytoplankton" ,"Thalassiosira sp.","Cerataulina bergonii"))) + 
+    scale_fill_manual(values = wes_palette("Zissou1", n = 9, type="continuous")) + 
+    scale_x_datetime(date_breaks = "4 months",date_labels="%b\n%Y") + 
+    theme_ipsum(axis_title_just = "m",axis_title_size = 10) + 
+    theme(legend.position="none",
+          text = element_text(family="Lato", size=10),
+          panel.grid.major.y=element_blank(),
+          panel.grid.minor=element_blank(),
+          panel.grid.major.x = element_line(linetype = "dashed", color="grey94")) +
+    labs(x = "", y="Percentage of the community (%)")
+
+ggsave(filename="F10_phyto.png", path = "../figures/", device='png', dpi=300, width=12,
+       height=7,unit="in")
+```
+

@@ -1,0 +1,426 @@
+---
+title: "Time series of the morphology" # title of the notebook
+author: "Virginie Sonnet \nvirginie_sonnet@uri.edu \nhttps://github.com/VirginieSonnet" # name, email and github with links
+date: "`r format(Sys.Date(), '%B %dth, %Y')`" # date of today (change th if today is 1st, 2nd or 3rd)
+output:
+  # specific format from the R package "rmdformats"
+  rmdformats::readthedown:
+    lightbox: TRUE # allows to click on an image to zoom in the HTML document
+    highlight: pygments # color code for code (default is also a good option)
+    toc_depth: 5 # level of headers to include in the table of contents 
+    # code_folding: "hide" # do not show the code (can access it with a button)
+    # use_bookdown: TRUE # automatic section numbering 
+    # toc_float: TRUE # for regular markdowns, allow the toc to not be on top but on the side
+---
+
+```{=html}
+<style>
+body {
+font-family: "LM Roman"}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+library(lubridate)
+library(data.table)
+library(factoextra)
+library(extrafont)
+loadfonts()
+library(tidyverse)
+library(cowplot)
+library(castr) # moving average => https://github.com/jiho/castr
+library(scales)
+library(grid)
+library(hrbrthemes)
+```
+
+## Introduction
+
+This code looks at the hourly aggregated morphological coordinates: time series, distribution and time series with main contributors.
+
+## Morphological time series
+
+```{r}
+# aggregated PC coordinates 
+morpho <- read_csv("../data/pca_coord_summary.csv") 
+```
+
+Now that we have our aggregated data, we want to regularize the time step to accurately plot the missing values.
+
+```{r}
+date <- tibble(date = seq(min(morpho$date), max(morpho$date), "hour"))
+morpho <- left_join(date, morpho) 
+```
+
+In order to make the plot easier to interpret, we are using a moving average to smooth the time series. We use a window of 60 values (30 before and after) and smooth over the time series 5 times.
+
+```{r}
+morpho_mean <- morpho %>% 
+  select(date, ends_with("mean") & -starts_with("conc")) %>%
+  pivot_longer(PC1_mean:PC4_mean, names_to="pc",values_to="values") %>% 
+  mutate(pc = str_remove(pc,"_mean")) %>% 
+  group_by(pc) %>% 
+  mutate(mavg = slide(values, k=60, mean, n=5, na.rm=TRUE)) %>% 
+  mutate(mavg = replace(mavg, is.na(values),NA))
+```
+
+Now we can plot the time series.
+
+```{r, fig.height=5.75}
+# axis labels
+labels <- c("PC1- Size", "PC2 - Width", "PC3 - Regularity", "PC4 - Chains") 
+
+
+# plot 
+p <- morpho_mean %>% ggplot(aes(x=date,y=values)) +
+  geom_hline(yintercept = 0, size = 0.5, color = "darkslateblue", linetype="dotted") +
+  geom_point(alpha=0.1,size = 0.5,col="grey") +
+  geom_path(aes(x=date, y=mavg, col=pc), size=0.9) + 
+  # theme
+  facet_wrap(.~pc, scale="free_y",strip.position = "left", nrow=4,
+             labeller = as_labeller(c("PC1"=labels[1],"PC2" = labels[2], "PC3" = labels[3],"PC4" = labels[4]))) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 15, family = "Lato"),
+        axis.title.y = element_text(size = 12, family = "Lato")) +
+  theme(panel.grid.major.x = element_line(size = 0.5, linetype = 'dashed', color="grey77"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.line.y.left = element_line(),
+        axis.ticks.y.left = element_line(),
+        strip.placement = "outside",
+        legend.position = "none") + 
+  # labels 
+  labs(x = "", y = "") +
+  # axis 
+  scale_x_datetime(expand=c(0,0), date_breaks="4 months", date_labels="%b\n%Y") 
+
+```
+
+```{r,fig.height=5.75, warning=FALSE}
+p
+ggsave(filename="F6_ts_morpho.tiff", path = "../figures/", device="tiff", dpi=300)
+```
+
+## Main contributors time series
+
+Let's plot how the different variable contribute to each axis. First, we need to convert all of them from pixels to microns (\~ 3.4 pixels/micron) and to assign one principal component to each.
+
+```{r}
+# load the data 
+raw <- read_tsv("../data/raw_morpho.csv")
+
+# convert to um
+raw <- raw %>% 
+  # average per hour 
+  mutate(date = round_date(date, "hour")) %>% 
+  group_by(date) %>% 
+  summarize_all(list(~mean(.,na.rm=TRUE))) %>% 
+  # convert to um, um2 and um3 (the extent and area.perim ratios)
+  mutate_at(c("min.ax","perim","maj.ax","med.dist","hflip"), ~./3.4) %>% 
+  mutate_at(c("area","area.perim2"), ~./(3.4*3.4)) %>% 
+  mutate_at(c("vol"),~./(3.4*3.4*3.4)) %>%
+  # duplicate the volume column to use it for both PC1 and 2 
+  mutate(vol2=vol)
+
+# regularize timespet
+date <- tibble(date=seq(min(raw$date),max(raw$date),"hour"))
+raw <- left_join(date, raw)
+
+# attribute the PC they contribute to 
+raw <- raw %>% 
+  pivot_longer(area:vol2, names_to="var", values_to="values") %>% 
+  mutate(pc = case_when(var %in% c("vol","area","perim","maj.ax") ~ "PC1",
+                        var %in% c("area.perim","min.ax","vol2","area.perim2") ~ "PC2",
+                        var %in% c("extent","perim.maj","hflip") ~ "PC3",
+                        var %in% c("med.dist","nb.blobs") ~ "PC4")) %>% 
+  mutate(var=ifelse(var == "vol2","vol",var)) %>% 
+  # add a slide curve 
+  group_by(pc,var) %>% 
+  mutate(mavg = slide(values, k=60, mean, n=5, na.rm=TRUE)) %>% 
+  mutate(mavg = replace(mavg, is.na(values),NA))
+```
+
+Now we can add the morphological averages
+
+```{r}
+morpho_mean <- add_column(morpho_mean,var=".PCmorpho")
+raw.morpho <- bind_rows(raw,morpho_mean)
+```
+
+And the last step is to plot.
+
+```{r}
+# PC1
+p1 <- raw.morpho %>% 
+  filter(pc=="PC1") %>%  
+  ggplot(aes(x=date,y=values)) +
+  geom_hline(yintercept = 0, size = 0.5, color = "darkslateblue", linetype="dotted") +
+  geom_point(alpha=0.1,size = 0.5,col="grey") +
+  geom_path(aes(x=date, y=mavg, col=ifelse(var==".PCmorpho",1,0)), size=0.9) + 
+  # theme
+  facet_wrap(.~var, scale="free_y",strip.position = "left",nrow=5) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 12, family = "Lato"),
+        axis.title.y = element_text(size = 12, family = "Lato")) +
+  theme(panel.grid.major.x = element_line(size = 0.5, linetype = 'dashed', color="grey77"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.line.y.left = element_line(),
+        axis.ticks.y.left = element_line(),
+        strip.placement = "outside",
+        legend.position = "none") + 
+  # labels 
+  labs(x = "", y = "",title="PC1 - Size") +
+  # axis 
+  scale_x_datetime(expand=c(0,0), date_breaks="6 months", date_labels="%b\n%Y")
+
+ggsave(plot=p1, filename="S4_morpho+raw_1.tiff", path = "../figures/", device='tiff', dpi=300)
+```
+
+```{r}
+# PC2 
+p2 <- raw.morpho %>% 
+  filter(pc=="PC2") %>%  
+  ggplot(aes(x=date,y=values)) +
+  geom_hline(yintercept = 0, size = 0.5, color = "darkslateblue", linetype="dotted") +
+  geom_point(alpha=0.1,size = 0.5,col="grey") +
+  geom_path(aes(x=date, y=mavg, col=ifelse(var==".PCmorpho",1,0)), size=0.9) + 
+  # theme
+  facet_wrap(.~var, scale="free_y",strip.position = "left",nrow=5) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 15, family = "Lato"),
+        axis.title.y = element_text(size = 12, family = "Lato")) +
+  theme(panel.grid.major.x = element_line(size = 0.5, linetype = 'dashed', color="grey77"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.line.y.left = element_line(),
+        axis.ticks.y.left = element_line(),
+        strip.placement = "outside",
+        legend.position = "none") + 
+  # labels 
+  labs(x = "", y = "",title="PC2 - Width") +
+  # axis 
+  scale_x_datetime(expand=c(0,0), date_breaks="6 months", date_labels="%b\n%Y") 
+```
+
+```{r}
+# PC3
+p3 <- raw.morpho %>% 
+  filter(pc=="PC3") %>%  
+  ungroup() %>% 
+  add_row(var=c("zextra1")) %>%  
+  ggplot(aes(x=date,y=values)) +
+  geom_hline(yintercept = 0, size = 0.5, color = "darkslateblue", linetype="dotted") +
+  geom_point(alpha=0.1,size = 0.5,col="grey") +
+  geom_path(aes(x=date, y=mavg, col=ifelse(var==".PCmorpho",1,0)), size=0.9) + 
+  # theme
+  facet_wrap(.~var, scale="free_y",strip.position = "left",nrow=5) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 15, family = "Lato"),
+        axis.title.y = element_text(size = 12, family = "Lato")) +
+  theme(panel.grid.major.x = element_line(size = 0.5, linetype = 'dashed', color="grey77"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.line.y.left = element_line(),
+        axis.ticks.y.left = element_line(),
+        strip.placement = "outside",
+        legend.position = "none") + 
+  # labels 
+  labs(x = "", y = "",title="PC3 - Regularity") +
+  # axis 
+  scale_x_datetime(expand=c(0,0), date_breaks="6 months", date_labels="%b\n%Y") 
+
+ggsave(plot=p3, filename="S4_morpho+raw_3.tiff", path = "../figures/", device='tiff', dpi=300)
+```
+
+```{r}
+# PC4
+p4 <- raw.morpho %>% 
+  filter(pc=="PC4") %>%  
+  ungroup() %>% 
+  add_row(var=c("zextra1","zextra2")) %>%  
+  ggplot(aes(x=date,y=values)) +
+  geom_hline(yintercept = 0, size = 0.5, color = "darkslateblue", linetype="dotted") +
+  geom_point(alpha=0.1,size = 0.5,col="grey") +
+  geom_path(aes(x=date, y=mavg, col=ifelse(var==".PCmorpho",1,0)), size=0.9) + 
+  # theme
+  facet_wrap(.~var, scale="free_y",strip.position = "left",nrow=5) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 15, family = "Lato"),
+        axis.title.y = element_text(size = 12, family = "Lato")) +
+  theme(panel.grid.major.x = element_line(size = 0.5, linetype = 'dashed', color="grey77"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.line.y.left = element_line(),
+        axis.ticks.y.left = element_line(),
+        strip.placement = "outside",
+        legend.position = "none") + 
+  # labels 
+  labs(x = "", y = "",title="PC4 - Chains") +
+  # axis 
+  scale_x_datetime(expand=c(0,0), date_breaks="6 months", date_labels="%b\n%Y") 
+
+ggsave(plot=p4, filename="S4_morpho+raw_4.tiff", path = "../figures/", device='tiff', dpi=300)
+
+```
+
+## Morphological distribution per season
+
+For this part, we need the full dataset in order to derive the distribution. We will consider that the year 2018 goes from November 2017 to
+
+```{r}
+# colnames(full) <- c("id","roi_number","class_id","date","conc","PC1","PC2","PC3","PC4")
+
+# colorpalette
+colorpalette <- c(rgb(0,175,187,50,maxColorValue=255),
+                  rgb(0,175,187,maxColorValue=255),
+                  rgb(0,100,0,50,maxColorValue=255),
+                  rgb(0,100,0,maxColorValue=255),
+                  rgb(252,78,8,50,maxColorValue=255),
+                  rgb(252,78,8,maxColorValue=255),
+                  rgb(242,215,73,50,maxColorValue=255),
+                  rgb(242,215,73,maxColorValue=255))
+
+full <- fread("../data/full_data_pca.csv") %>% 
+  select(-c(id,roi_number,class_id,conc)) %>% 
+  rename("PC1" = "1", "PC2"="2","PC3"="3","PC4"="4") %>% 
+  # add year 
+  mutate(year = case_when(date < "2018-11-01" ~ "2018",
+                          date >= "2018-11-01" ~ "2019")) %>% 
+  # add season 
+  mutate(quarter = quarter(date)) %>% 
+  mutate(quarter = case_when(quarter==1 ~ "Winter",
+                             quarter==2 ~ "Spring",
+                             quarter==3 ~ "Summer",
+                             quarter==4 ~ "Fall")) %>% 
+  mutate(quarter=factor(quarter, levels=c("Winter","Spring","Summer","Fall"))) %>%
+  # attribute a color 
+  mutate(col = case_when(quarter == "Winter" & year==2018 ~ "#00AFBB32",
+                         quarter == "Winter" & year==2019 ~ "#00AFBB",
+                         quarter == "Fall" & year==2018 ~ "#00640032",
+                         quarter == "Fall" & year==2019 ~ "#006400",
+                         quarter == "Spring" & year==2018 ~ "#FC4E0832",
+                         quarter == "Spring" & year==2019 ~ "#FC4E08",
+                         quarter == "Summer" & year==2018 ~ "#F2D74932",
+                         quarter == "Summer" & year==2019 ~ "#F2D749")) %>%
+  mutate(col = factor(col, levels = colorpalette)) %>%
+  # format long 
+  pivot_longer(PC1:PC4, values_to="values", names_to="pc") 
+```
+
+```{r}
+full %>%
+  ggplot(aes(x=quarter, y=value, fill=col, group=col, color=col)) +
+  geom_violin(position=position_dodge(width = 0.9)) + 
+  geom_boxplot(width=0.1,position = position_dodge(width =0.9),fill="white") + 
+  facet_wrap(.~pc, nrow=2,ncol=2, scales="free",strip.position="left",
+             labeller=as_labeller(c("PC1"="PC1 - Size","PC2"=" PC2 - Width","PC3"="PC3 - Regularity","PC4"="PC4 - Colonies"))) +
+  stat_compare_means(aes(label = ..p.format..), method="wilcox", size=4, family="Lato") + 
+  scale_fill_manual(values=colorpalette)+
+  scale_color_manual(values=colorpalette)+
+  # theme 
+  theme_classic() + 
+  theme(text = element_text(size=15, family="Lato"),
+        panel.grid=element_blank(),
+        legend.position="none",
+        strip.background=element_blank(),
+        strip.placement="outside") +
+  # axis 
+  labs(x="",y="",fill="")
+```
+
+## Zooplankton
+
+We have data available on **zooplankton** only between November 2018 and March 2019. We can look at the time series during that period with the morphological composites variables and the nutrients, temperature and salinity.
+
+```{r}
+# wide format morpho
+data <- morpho_mean %>% 
+  select(-mavg) %>% 
+  pivot_wider(names_from="pc", values_from="values")
+
+# environment 
+envt <- read_csv("../data/NBay_hourly.csv", guess_max=1000) %>% 
+  select(-c(no3:nh4))
+data <- left_join(data, envt)
+
+# zooplankton 
+zoo <- read_csv("../data/zooplankton_nicole_flecchia.csv") %>% 
+  # rename for easiness 
+  select(date, vol_m3=`volume sampled (m3)`, copepod_nauplii="copepod nauplii",
+         acartia_copepopids="acartia copepopids",
+         a.hudsonica_adults="a. hudsonica adults",a.tonsa_adults="a. tonsa adults",
+         other_copepods="other copepods",barnacle_nauplii="barnacle nauplii",
+         barnacle_cyprids="barnacle cyprids",hydromedusa="hydromedusa",
+         polychete_worms="polychete worms",fish_eggs="fish eggs",
+         bivalve:gastropods) %>% 
+  # transform in cells/m3
+  mutate_at(vars(copepod_nauplii:gastropods), ~./vol_m3) %>% 
+  # add 8am to the time so that we can join 
+  mutate(date = mdy_hms(paste(date,"08:00:00"))) %>% 
+  # sum the total zooplankton and copepods
+  mutate(tot_zoo = rowSums(select(.,copepod_nauplii:gastropods)),
+         tot_cop = rowSums(select(.,copepod_nauplii:other_copepods))) %>% 
+  select(-c(vol_m3:gastropods))
+data <- left_join(data,zoo)
+```
+
+The zooplankton and environment data are on a weekly basis so we will average per week.
+
+```{r}
+data <- data %>% 
+  mutate(date = floor_date(date,"week")) %>% 
+  group_by(date) %>% 
+  summarize_all(list(~mean(.,na.rm=TRUE))) %>% 
+  drop_na(tot_zoo) %>% 
+  pivot_longer(PC1:tot_cop,names_to="var",values_to="values") %>% 
+  mutate(type = case_when(var %in% c("di_no","di_po","si") ~ "Nutrients (uM)",
+                          var %in% c("PC1","PC2","PC3","PC4") ~"Morpho",
+                          var %in% c("tot_zoo","tot_cop") ~ "Zooplankton \n(cells/m3)",
+                          var == "temp" ~ "Temperature (C)",
+                          var == "sal" ~ "Salinity",
+                          var == "light" ~ "Light (W/m2)")) %>% 
+  mutate(var = case_when(var == "di_no" ~ "nitrogen",
+                         var == "di_po" ~ "phosphate",
+                         var == "si" ~ "silicate",
+                         var == "tot_cop" ~ "copepods",
+                         var == "tot_zoo" ~ "zooplankton",
+                         var == "PC1" ~ "size",
+                         var == "PC2" ~ "width",
+                         var == "PC3" ~ "regularity",
+                         var == "PC4" ~ "chains",
+                         TRUE ~ var))
+```
+
+Now we can plot them together.
+
+```{r}
+data %>% 
+  mutate(type=factor(type, levels=c("Morpho","Zooplankton \n(cells/m3)", "Nutrients (uM)","Temperature (C)","Salinity","Light (W/m2)"))) %>% 
+  ggplot(aes(x=date, y=values, color=var)) +
+  geom_line(size=1) + 
+  geom_point(size=1.5) + 
+  facet_wrap(.~type, scales="free_y",nrow=6,strip.position="left") + 
+  scale_y_comma(breaks = breaks_extended(4)) + 
+  scale_x_datetime(date_labels="%b \n%Y") + 
+  scale_color_manual(values=c("orange2","slateblue2","lightgoldenrod2",
+                              "paleturquoise2","deepskyblue3","firebrick4",
+                              "springgreen2","dodgerblue4","gold1","lightcoral","coral3", "darkorchid3")) + 
+  theme_bw() + 
+  theme(strip.placement="ourside",
+        strip.background=element_blank(),
+        strip.text = element_text(size=14,family="Lato"),
+        axis.text=element_text(size=12,family="Lato"),
+        panel.border=element_blank(),
+        legend.position="null",
+        panel.grid.minor.y=element_blank(),
+        legend.text = element_text(size=14,family="Lato"),
+        panel.grid.major.x = element_line(color="grey85",size=0.75)) + 
+  labs(x="",y="")
+
+ggsave(filename="S5_zoo.svg", path = "../figures/", device='svg', dpi=300,
+       width=6.5,height=10,unit="in")
+```

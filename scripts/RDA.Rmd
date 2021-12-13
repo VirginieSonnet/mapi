@@ -1,0 +1,160 @@
+---
+title: "RDA" # title of the notebook
+author: "Virginie Sonnet \nvirginie_sonnet@uri.edu \nhttps://github.com/VirginieSonnet" # name, email and github with links
+date: "`r format(Sys.Date(), '%B %dth, %Y')`" # date of today (change th if today is 1st, 2nd or 3rd)
+output:
+  # specific format from the R package "rmdformats"
+  rmdformats::readthedown:
+    lightbox: TRUE # allows to click on an image to zoom in the HTML document
+    highlight: pygments # color code for code (default is also a good option)
+    toc_depth: 5 # level of headers to include in the table of contents 
+    # code_folding: "hide" # do not show the code (can access it with a button)
+    # use_bookdown: TRUE # automatic section numbering 
+    # toc_float: TRUE # for regular markdowns, allow the toc to not be on top but on the side
+---
+
+<style>
+body {
+font-family: "LM Roman"}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+rm(list=ls())
+gc()
+```
+
+```{r}
+# data manipulation
+library(tidyverse)
+library(lubridate)
+library(vegan)
+library(data.table)
+library(ggrepel)
+library(pals)
+library(extrafont)
+loadfonts(device="win")
+library(svglite)
+```
+
+## Introduction
+
+This code shows the RDA model used for the morphological coordinates. The timestep for the nutrients needs to be regularized. 
+
+```{r}
+# environmental data  
+envt <- read_csv("../data/NBay_hourly.csv", guess_max = 1000) %>% 
+  select(date,temperature=temp,salinity=sal,light=light,nitrogen=di_no,phosphate=di_po,
+         silicate=si)
+
+# change the date for the nutrients to the Monday of each week 
+week <- seq(ymd("2017-11-01"),ymd("2019-11-01"),"week")
+nuts <- select(envt,nitrogen:silicate) %>% drop_na() %>%
+  add_column(date=week)
+
+# join them 
+envt <- envt %>%
+  select(-c(nitrogen:silicate)) 
+
+# morphology
+morpho <- fread("../data/pca_coord_summary.csv") %>% 
+  select(date, PC1_mean:PC4_mean) %>% 
+  rename_at(vars(ends_with("_mean")),~str_remove(.,"_mean")) %>%
+  rename("size"="PC1","width"="PC2","regularity"="PC3","chains"="PC4")
+
+# join 
+data <- left_join(morpho,envt) %>%
+  mutate(date=floor_date(date, "week",
+                         week_start = getOption("lubridate.week.start", 3))) %>% 
+  group_by(date) %>% 
+  summarize_all(list(~mean(.,na.rm=TRUE))) %>%
+  left_join(nuts) %>%
+  drop_na()
+```
+
+## RDA
+
+Build the matrices. 
+
+```{r}
+# Community matrix
+w_com <- data %>% 
+  select(date, size:chains) %>% 
+  mutate(date = format(date, '%y%m%d')) %>% 
+  column_to_rownames(var = "date") %>% 
+  as.matrix()
+
+# Environment matrix 
+w_envt <- data %>% 
+  select(date, temperature:silicate) %>% 
+  mutate(year = year(date),
+         month = lubridate::month(date, label=TRUE, abbr=FALSE),
+         month_nb = lubridate::month(date),
+         month_abbrv = lubridate::month(date,label=TRUE,abbr=TRUE),
+         date = format(date, '%y%m%d'))
+```
+
+Let's run the RDA. 
+
+```{r}
+wrda = rda(data.frame(w_com)~temperature+light+salinity+silicate+nitrogen+phosphate, data=data.frame(w_envt), scale=TRUE)
+wrda
+summary(wrda)
+RsquareAdj(wrda)
+anova(wrda) # p-value < 0.05 reject H0 that does not explain some of the variance 
+anova(wrda, by="term")
+anova(wrda, by="axis")
+```
+Now we can plot the RDA. 
+
+```{r}
+# scaling = 2 
+resw = fortify(wrda)
+sitesw = filter(resw, Score=="sites")
+pcw = filter(resw, Score == "species")
+
+# arrows 
+take <- c('RDA1', 'RDA2')  # which columns contain the scores we want
+arrowsw <- subset(resw, Score == 'biplot')  # take only biplot arrow scores
+
+## multiplier for arrows to scale them to the plot range
+mul <- ggvegan:::arrowMul(arrowsw[, take],
+                          subset(resw, select = take, Score == 'sites'))
+arrowsw[, take] <- arrowsw[, take] * mul  # scale biplot arrows
+
+
+# plot 
+ggplot() + 
+  geom_point(aes(x = sitesw$RDA1, y = sitesw$RDA2, color=factor(w_envt$month),
+                 shape=factor(w_envt$year))) + 
+#    geom_text(aes(x = sitesw$RDA1, y = sitesw$RDA2, label=substr(w_envt$year,3,4),color=factor(w_envt$month)), size=3) +
+#  geom_point(aes(x = pcw$RDA1, y = pcw$RDA2), color="red", size = 3) + 
+  geom_segment(data = arrowsw, mapping = aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+             arrow = arrow(length = unit(0.01, "npc")), color="black") +
+  geom_text_repel(data = arrowsw, # crudely push labels away arrow heads
+             mapping = aes(label = Label, x = RDA1 * 1.1, y = RDA2 * 1.1), 
+            color="black",fontface="bold",family="Lato",size=4.5) + 
+    
+  geom_segment(data = pcw, aes(x = 0, y=0, xend=RDA1, yend = RDA2, label=Label),
+               arrow = arrow(length = unit(0.01, "npc")), color="green4",fontface = "italic") +
+    geom_text_repel(data=pcw, mapping = aes(label = Label, x = RDA1 * 1.1, y = RDA2 * 1.1), 
+            color="green4",fontface="italic",family="Lato",size=4.5) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.border = element_blank(), panel.background = element_blank(),
+        legend.key=element_blank(), text=element_text(size=15,family="Lato")) + 
+  geom_hline(aes(yintercept=0), linetype="dashed") + 
+  geom_vline(aes(xintercept=0), linetype="dashed") + 
+  scale_x_continuous(expand=c(0.01,0.01),breaks=c(0)) + 
+  scale_y_continuous(expand=c(0.01,0.01),breaks=c(0)) + 
+  scale_color_manual(values=kovesi.cyclic_wrwbw_40_90_c42_s25(12)) + 
+  labs(color="",shape="", x="RDA1 (17.6%)", y="RDA2 (3.6%)")
+
+ggsave(filename="F8_RDA.svg", path = "../figures/", device='svg', dpi=300)
+```
+
+
+
+

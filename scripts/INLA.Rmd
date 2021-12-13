@@ -1,0 +1,217 @@
+---
+title: "INLA" # title of the notebook
+author: "Virginie Sonnet \nvirginie_sonnet@uri.edu \nhttps://github.com/VirginieSonnet" # name, email and github with links
+date: "`r format(Sys.Date(), '%B %dth, %Y')`" # date of today (change th if today is 1st, 2nd or 3rd)
+output:
+  # specific format from the R package "rmdformats"
+  rmdformats::readthedown:
+    lightbox: TRUE # allows to click on an image to zoom in the HTML document
+    highlight: pygments # color code for code (default is also a good option)
+    toc_depth: 5 # level of headers to include in the table of contents 
+    # code_folding: "hide" # do not show the code (can access it with a button)
+    # use_bookdown: TRUE # automatic section numbering 
+    # toc_float: TRUE # for regular markdowns, allow the toc to not be on top but on the side
+---
+
+<style>
+body {
+font-family: "LM Roman"}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+rm(list=ls())
+gc()
+```
+
+```{r}
+# data manipulation
+library(tidyverse) # data manipulation
+library(lubridate) # dates
+library(imputeTS) # missing values imputation 
+library(TSA) # harmonic components 
+
+# fitting
+library(INLA) # install.packages("INLA", repos=c(getOption("repos"), INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+# inla.update(testing=T)
+
+# parallelization 
+library(parallel)
+detectCores()
+
+# plotting
+source("INLA_brinla_updated.R")
+library(extrafont)
+loadfonts()
+```
+
+## Introduction
+
+This code shows how to run an INLA model on morphological variables, using environmental variables as predictors. 
+
+
+
+## Data 
+
+We first need to load the morphological coordinates averaged per hour and the environmental data. We only keep temperature, light and salinity as regressors since they have the hourly resolution. 
+
+```{r}
+# morpho
+pca <- read_csv("../data/pca_coord_summary.csv") %>% 
+  select(date, ends_with("mean") & !starts_with("conc")) %>% 
+  rename_at(vars(ends_with("_mean")), ~str_remove(.,"_mean"))
+
+# environment
+envt <- read_csv("../data/NBay_hourly.csv", guess_max=3000) %>% 
+  select(date, temp, sal, light)
+
+# join
+data <- left_join(pca, envt) %>% 
+  # convert to EST time zone
+  mutate(date = with_tz(date, tzone = "EST")) 
+```
+
+Now that we have our dataset, we want to scale our regressors so that their coefficients are directly comparable.  
+
+```{r}
+data <- data %>% 
+  mutate_at(vars(-all_of(c("date","PC1","PC2","PC3","PC4"))),  ~(scale(.) %>% as.vector)) 
+```
+
+## INLA 
+
+We first set-up our different vectors. 
+
+```{r}
+# Vectors of values 
+# ---
+temp = as_vector(data$temp) # temperature
+sal = as_vector(data$sal) # salinity
+light = as_vector(data$light) # light
+
+
+# Corresponding length vectors 
+# ---
+N = nrow(data)
+t = seq(1, N) # temperature
+s = seq(1, N) # salinity
+l = seq(1, N) # light
+
+j = seq(1,N) # for seasonal component
+ind1 = seq(1,N) # for dynamic intercept
+```
+
+Now we need to construct our regression formula with: 
+
+* dynamic intercept 
+* seasonal component
+* temperature
+* salinity 
+* light 
+
+```{r}
+# Formula 
+# ---
+formula = y ~ f(ind1, model = "rw1", constr=T) +
+  f(j, model="seasonal", season.length=24) +
+  f(t,temp,model="rw1",constr=F) +
+  f(s,sal,model="rw1",constr=F) + 
+  f(l,light,model="rw1", constr=F) - 1
+```
+
+Calling INLA can be done by hand or you can loop or use a function over your 4 different variables. Here we use a function, `morpho_inla` that extracts the morphological variable and run the INLA model on it using the formula we created before. We store all of the main results in an R object (we used to store the whole INLA model but files often get corrupted). 
+
+If you have several cores that are free on your computer, you can run the model in parallel. However, note that `mc.cores > 1` is only supported on Mac, not on Windows.  
+
+```{r}
+# morphological variables 
+var <- c('PC1', "PC2" ,"PC3","PC4")
+
+
+# function to generate and save the results 
+morpho_inla <- function(var){
+  y <- as_vector(data[[var]])
+  res = inla(formula=formula,data=data.frame(y,ind1,l,t,s,j),family="gaussian",
+             control.predictor=list(compute=TRUE), 
+             control.compute = list(dic = TRUE, waic = TRUE,mlik=TRUE,cpo=TRUE),
+             control.inla = list(strategy = "gaussian",int.strategy = "eb"), 
+             num.threads = 1,verbose=TRUE)
+  r <- list(names.fixed = res$names.fixed,
+            summary.fitted.values = res$summary.fitted.values,
+            marginals.fitted.values = res$marginals.fitted.values,
+            marginals.fixed = res$marginals.fixed,
+            summary.fixed = res$summary.fixed,
+            summary.random = res$summary.random,
+            misc = res$misc,
+            waic = res$waic$waic,
+            dic = res$dic$dic)
+  rm(res)
+  saveRDS(r, file=paste("../data/inla_",var,".rds",sep=""))
+} 
+
+
+# parallelization 
+results <- mclapply(var, morpho_inla, mc.cores = 4) # leave 2 cores for other processes
+```
+
+## Graphs 
+
+Now we can plot the random effects (temperature, light, salinity and the dynamic intercept). This script uses a modified version of the functions of the package **brinla** (https://github.com/julianfaraway/brinla). 
+
+```{r}
+labels <- c("ind1"="intercept","j"="seasonal","s"="salinity","t"="temperature","l"="light")
+
+# load the data 
+pc1.mod <- readRDS("../data/inla_pc1.rds")
+pc2.mod <- readRDS("../data/inla_pc2.rds")
+pc3.mod <- readRDS("../data/inla_pc3.rds")
+pc4.mod <- readRDS("../data/inla_pc4.rds")
+``` 
+
+```{r}
+plot_random_effects(
+  pc1.mod, date=data$date, date_breaks="4 months", label=labels, 
+                           title="PC1 - Size",legend=FALSE) + theme(axis.line.x=element_line(linetype="dotted",color="grey90",size=0.75),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_line(color=" grey98"))
+
+ggsave(filename="F9_INLA1.tiff", path = "../figures/", device='tiff', dpi=300)
+```
+
+```{r}
+plot_random_effects(
+  pc2.mod, date=data$date, date_breaks="4 months", label=labels, 
+                           title="PC2 - Width",legend=FALSE) + theme(axis.line.x=element_line(linetype="dotted",color="grey90",size=0.75),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_line(color=" grey98"))
+ggsave(filename="F9_INLA2.tiff", path = "../figures/", device='tiff', dpi=300, 
+       width=4.41, height=5.69, units="in")
+```
+
+```{r}
+plot_random_effects(
+  pc3.mod, date=data$date, date_breaks="4 months", label=labels, 
+                           title="PC3 - Regularity",legend=FALSE) + theme(axis.line.x=element_line(linetype="dotted",color="grey90",size=0.75),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_line(color=" grey98"))
+ggsave(filename="F9_INLA3.tiff", path = "../figures/", device='tiff', dpi=300,
+       width=4.41, height=5.69, units="in")
+```
+
+```{r}
+plot_random_effects(
+  pc4.mod, date=data$date, date_breaks="4 months", label=labels, 
+                           title="PC4 - Chains",legend=FALSE) + theme(axis.line.x=element_line(linetype="dotted",color="grey90",size=0.75),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_line(color=" grey98"))
+ggsave(filename="F9_INLA4.tiff", path = "../figures/", device='tiff', dpi=300,
+       width=4.41, height=5.69, units="in")
+```
+
+
+
+
+

@@ -1,0 +1,134 @@
+---
+title: "PCA" # title of the notebook
+author: "Virginie Sonnet \nvirginie_sonnet@uri.edu \nhttps://github.com/VirginieSonnet" # name, email and github with links
+date: "`r format(Sys.Date(), '%B %dth, %Y')`" # date of today (change th if today is 1st, 2nd or 3rd)
+output:
+  # specific format from the R package "rmdformats"
+  rmdformats::readthedown:
+    lightbox: TRUE # allows to click on an image to zoom in the HTML document
+    highlight: pygments # color code for code (default is also a good option)
+    toc_depth: 5 # level of headers to include in the table of contents 
+    # code_folding: "hide" # do not show the code (can access it with a button)
+    # use_bookdown: TRUE # automatic section numbering 
+    # toc_float: TRUE # for regular markdowns, allow the toc to not be on top but on the side
+---
+
+<style>
+body {
+font-family: "LM Roman"}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(factoextra)
+library(grid)
+library(extrafont)
+library(svglite)
+loadfonts()
+```
+
+## Introduction
+
+This code looks at the main characteristics of the PCA returned from the subsampling analysis presented in the project *Subsampling of Plankton Imagery Datasets and Reprojection in a morphospace* (spidr, <https://github.com/VirginieSonnet/spidr>).
+
+## Drivers of the morphological space
+
+```{r}
+# PCA object 
+res.pca <- readRDS("../data/res_pca.rds")
+```
+
+Let's first plot the contribution of each of the 7 dimensions retained to the global variation. We will use a **scree plot**.
+
+```{r}
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 50)) + theme_classic() + 
+  theme(text = element_text(size = 12, family="Lato"),
+        axis.title=element_text(face="bold"),
+        title=element_text(face="bold")) 
+
+ggsave(filename="S3_screeplot.tiff", path = "../figures/", device='tiff', dpi=300)
+```
+
+We will choose to only continue with the 4 first ones. Now we want the **variables** that contribute the most to each of the axis.
+
+On the first plot, PC1 vs. PC2, the variables are selected manually. They all correspond to a *cos2 \> 0.7 and only one variables from a set of repetitive measurements* was kept (e.g.: area for area, summed area, convex area, summed convex area).
+
+On the second plot, all the variables with a *cos2 \> 0.2* are kept.
+
+Note that the picture was later modified in Inkscape to re-arrange the labels and in Powerpoint to add the extremes for each axis.
+
+```{r}
+# PC1 vs. PC2 
+var12 <- fviz_pca_var(res.pca, gradient.cols = c("#FFFFFF","#000000"),title="", font.family=gpar(fontfamily="serif"), select.var=list(name=c("area.perim","vol","maj.ax","perim","area","eq.diam", "maj.min","h90","skew.dist","min.ax","circ")), labelsize=5.5, repel=TRUE) + 
+  theme(text = element_text(size = 12, family = gpar(fontfamily="serif"))) + 
+  theme(legend.position="none",
+        panel.grid=element_line(color="grey97")) + 
+  labs(x="PC1 (46.2%)", y="PC2 (21.4%)")
+
+# PC3 vs. PC4
+var34 <- fviz_pca_var(res.pca, axes=c(3,4), , select.var = list(cos2 = 0.2), title="", gradient.cols = c("#FFFFFF","#000000"), repel=TRUE, font.family=gpar(fontfamily="serif"), labelsize=5.5) + 
+  theme(text = element_text(size = 12, family = gpar(fontfamily="serif"))) + 
+  theme(legend.position="none",
+        panel.grid=element_line(color="grey97")) + 
+  labs(x="PC3 (9.3%)", y="PC4 (4.2%)") 
+
+plot_grid(var12,var34,labels=c("a","b"), align="hv", nrow=1,ncol=2)
+
+ggsave(filename="F5_PCAvar.svg", path = "../figures/", device='svg', dpi=300)
+```
+
+We are not plotting the graphs for **individuals** because with more than 6.6 million points, it would take forever, only work if they are directly plotted to a file (not in R) and would only form a cloud. An example of how it looks like is included in the spidr tutorial (<https://virginiesonnet.github.io/spidr/>).
+
+## Extremes of the morphological space
+
+```{r}
+# coordinates of all images in the morphospace
+coord <- fread("../data/full_data_pca.csv")
+colnames(coord) <- c("id","roi_number","class_id","date","conc","PC1","PC2","PC3","PC4")
+```
+
+Let's get all of the extremes first.
+
+```{r}
+ex <- coord %>% 
+  summarize(min_1=min(PC1),max_1=max(PC1),min_2=min(PC2),max_2=min(PC2),
+            min_3=min(PC3),max_3=min(PC3),min_4=min(PC4),max_4=min(PC4))
+```
+
+Now, we get max and min images for each axis that are also around 0 on the other orthogonal axis and ones around the center (both PC values are around 0). The values were determined going down from the maximum and minimum and iterating until having 4 to 12 images roi ids that can be extracted into images.
+
+```{r}
+rois <- bind_rows(filter(coord, (PC1 < 1 & PC1 > -1) & PC2 < -25),
+                  filter(coord, (PC1 < 1 & PC1 > -1) & PC2 > 13),
+                  filter(coord, (PC2 < 1 & PC2 > -1) & PC1 < -10),
+                  filter(coord, (PC2 < 1 & PC2 > -1) & PC1 > 12.5),
+                  filter(coord, (PC3 < 1 & PC3 > -1) & PC4 < -13),
+                  filter(coord, (PC3 < 1 & PC3 > -1) & PC4 > 8), 
+                  filter(coord, (PC4 < 1 & PC4 > -1) & PC3 < -11.5),
+                  filter(coord, (PC4 < 1 & PC4 > -1) & PC3 > 7.5),
+                  filter(coord, (PC4 < 0.005 & PC4 > -0.005) 
+                         & (PC3 > -0.005 & PC3 < 0.005)),
+                  filter(coord, (PC2 < 0.005 & PC2 > -0.005) 
+                         & PC1 > -0.005 & PC1 < 0.005)
+                  )
+```
+
+## Community summary
+
+We are rounding each sample date to the nearest hour and recording the median, the average per hour and the quartiles 1 et 3.
+
+```{r}
+coord_summary <- coord %>% 
+  mutate(date=round_date(date,"hour")) %>% 
+  select(-c(id, class_id, roi_number)) %>% 
+  group_by(date) %>% 
+    summarize_all(list(mean=mean,med=median,q1=function(x) quantile(x,probs=0.25,na.rm=T), q3=function(x) quantile(x,probs=0.75,na.rm=T)))
+
+write_csv(coord_summary,"../data/pca_coord_summary.csv")
+```
